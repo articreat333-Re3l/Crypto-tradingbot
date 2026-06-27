@@ -1,0 +1,31 @@
+services:
+  - type: worker
+    name: crypto-scanner-v2
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python botv2.py
+    autoDeploy: false
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: crypto-scanner-db
+          property: connectionString
+      - key: RETEST_MODE
+        value: confirmation
+      - key: CONFLUENCE_THRESHOLD
+        value: "6"
+      - key: LOOP_INTERVAL_SECONDS
+        value: "300"
+      - key: STARTUP_ALERT
+        value: "true"
+
+databases:
+  - name: crypto-scanner-db
+    plan: free
+    databaseName: cryptoscanner
+    user: botv2
