@@ -168,7 +168,6 @@ class Settings:
     alert_cooldown_seconds: int
 
     # --- Persistence ---
-    database_url: str
     sqlite_path: str
 
     # --- Misc ---
@@ -217,9 +216,6 @@ def load_settings() -> Settings:
     except ValueError:
         retest_mode = RetestMode.CONFIRMATION
 
-    database_url = _env_str("DATABASE_URL", "")
-    sqlite_path = _env_str("SQLITE_PATH", "botv2.db")
-
     return Settings(
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,
@@ -254,8 +250,7 @@ def load_settings() -> Settings:
         pending_trade_expiry_seconds=_env_int("PENDING_TRADE_EXPIRY_SECONDS", 3 * 3600),
         confirmation_window_candles=_env_int("CONFIRMATION_WINDOW_CANDLES", 3),
         alert_cooldown_seconds=_env_int("ALERT_COOLDOWN_SECONDS", 3 * 3600),
-        database_url=database_url,
-        sqlite_path=sqlite_path,
+        sqlite_path=_env_str("SQLITE_PATH", "botv2.db"),
         signal_log_file=_env_str("SIGNAL_LOG_FILE", "signals.csv"),
         min_candles_required=_env_int("MIN_CANDLES_REQUIRED", 60),
     )

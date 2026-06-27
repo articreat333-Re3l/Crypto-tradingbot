@@ -9,12 +9,10 @@ services:
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
-      - key: TELEGRAM_CHAT_ID
+      - key: SIGNALS_CHAT_ID
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: crypto-scanner-db
-          property: connectionString
+      - key: ADMIN_CHAT_ID
+        sync: false
       - key: RETEST_MODE
         value: confirmation
       - key: CONFLUENCE_THRESHOLD
@@ -23,9 +21,3 @@ services:
         value: "300"
       - key: STARTUP_ALERT
         value: "true"
-
-databases:
-  - name: crypto-scanner-db
-    plan: free
-    databaseName: cryptoscanner
-    user: botv2

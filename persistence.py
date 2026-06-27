@@ -4,17 +4,12 @@ persistence.py
 Durable storage for pending/running/archived trades, alert cooldowns,
 and small bits of bot state (last daily-summary date, etc).
 
-Backend selection:
-  - If DATABASE_URL is set (e.g. a free Render Postgres instance), trades
-    survive redeploys, not just process crashes.
-  - Otherwise falls back to a local SQLite file. This still gives you
-    crash recovery within the same deploy (the file lives on disk, so a
-    process restart picks it back up) but resets on redeploy unless you
-    also attach a Render persistent disk and point SQLITE_PATH at it.
+Backend: SQLite, always.
 
-Same code path either way -- SQLAlchemy Core abstracts the SQL dialect
-differences, and upserts are done as update-then-insert-if-missing so we
-don't need dialect-specific ON CONFLICT syntax.
+SQLAlchemy Core is used for schema management, connection handling, and
+query building. The database file is created automatically on first run.
+WAL mode is enabled so the Telegram polling thread (reads) and the main
+scanner loop (writes) never block each other.
 """
 
 from __future__ import annotations
@@ -88,27 +83,8 @@ kv_table = Table(
 )
 
 
-def _normalize_db_url(url: str) -> str:
-    # Some providers (Heroku-style) still hand out postgres:// which
-    # SQLAlchemy's psycopg2 driver no longer accepts directly.
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg2://", 1)
-    if url.startswith("postgresql://") and "+psycopg2" not in url:
-        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    return url
-
-
 def _build_engine():
-    if settings.database_url:
-        url = _normalize_db_url(settings.database_url)
-        log.info("Persistence backend: Postgres (durable across redeploys)")
-        return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5)
-    log.warning(
-        "Persistence backend: local SQLite file (%s). This survives crashes "
-        "within the same deploy but resets on redeploy unless DATABASE_URL "
-        "is set or a Render persistent disk is attached at this path.",
-        settings.sqlite_path,
-    )
+    log.info("Persistence backend: SQLite (%s)", settings.sqlite_path)
     return create_engine(
         f"sqlite:///{settings.sqlite_path}",
         connect_args={"check_same_thread": False},
@@ -116,17 +92,18 @@ def _build_engine():
 
 
 _engine = _build_engine()
-_lock = threading.Lock()  # SQLite doesn't love concurrent writers; cheap insurance
+_lock = threading.Lock()  # serialises writes; reads are lock-free
 
 
 def init_db() -> None:
     metadata.create_all(_engine)
-    if not settings.database_url:
-        try:
-            with _engine.begin() as conn:
-                conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-        except Exception:
-            pass
+    # WAL mode: readers never block writers and writers never block readers.
+    # Safe to set unconditionally on every startup; SQLite persists the setting.
+    try:
+        with _engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
     log.info("Database initialised")
 
 
