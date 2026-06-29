@@ -208,6 +208,7 @@ def _process_symbol(symbol: str) -> None:
         planned_rr=rr,
         confluence_score=confluence.score,
         source=zone.source.value,
+        planned_entry=planned_entry,
     )
 
     tg.mark_cooldown(symbol, breakout.direction)

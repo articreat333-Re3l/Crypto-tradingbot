@@ -262,32 +262,90 @@ def build_pending_alert(trade: Trade) -> str:
 
 def build_entry_alert(trade: Trade) -> str:
     arrow = "🟢" if trade.direction is Direction.BULLISH else "🔴"
-    rr_str = f"{trade.realized_rr:.2f}" if trade.realized_rr is not None else "—"
-    return (
-        f"🔥 *ENTRY TRIGGERED*\n\n"
-        f"{arrow} *{trade.symbol}* — {trade.direction.value.upper()}\n"
-        f"Entry: `{fmt_price(trade.entry_price)}`\n"
-        f"Stop Loss: `{fmt_price(trade.stop_loss)}`\n"
-        f"Take Profit: `{fmt_price(trade.take_profit)}`\n"
-        f"ATR: `{fmt_price(trade.atr)}`\n"
-        f"RR: `{rr_str}`\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n\n"
-        f"[Chart]({tradingview_link(trade.symbol)})"
-    )
+    tp_display = trade.actual_target if trade.actual_target is not None else trade.take_profit
+    lines = [
+        f"🔥 *ENTRY TRIGGERED*\n",
+        f"{arrow} *{trade.symbol}* — {trade.direction.value.upper()}",
+        f"Entry:       `{fmt_price(trade.entry_price)}`",
+        f"Stop Loss:   `{fmt_price(trade.stop_loss)}`",
+        f"Take Profit: `{fmt_price(tp_display)}`",
+        f"ATR:         `{fmt_price(trade.atr)}`",
+        f"Planned RR:  `{trade.planned_rr:.2f}`",
+    ]
+    if trade.slippage is not None and trade.planned_entry is not None:
+        sign = "+" if trade.slippage >= 0 else ""
+        lines.append(
+            f"Slippage:    `{sign}{fmt_price(trade.slippage)}` "
+            f"vs planned `{fmt_price(trade.planned_entry)}`"
+        )
+    lines.append(f"\n[Chart]({tradingview_link(trade.symbol)})")
+    return "\n".join(lines)
+
+
+def _fmt_duration(triggered_ts: Optional[float], closed_ts: Optional[float]) -> str:
+    if not triggered_ts or not closed_ts:
+        return "—"
+    secs = max(0, int(closed_ts - triggered_ts))
+    h, rem = divmod(secs, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if h else f"{m}m"
 
 
 def build_outcome_alert(trade: Trade) -> str:
-    rr = trade.realized_rr
-    rr_str = f"{rr:.2f}" if rr is not None else "—"
-    if trade.state.value == "tp_hit":
-        return (
-            f"✅ *TP HIT* — *{trade.symbol}* ({trade.direction.value.upper()})\n"
-            f"Exit: `{fmt_price(trade.exit_price)}`  |  RR: `{rr_str}`"
-        )
-    return (
-        f"❌ *SL HIT* — *{trade.symbol}* ({trade.direction.value.upper()})\n"
-        f"Exit: `{fmt_price(trade.exit_price)}`  |  RR: `{rr_str}`"
-    )
+    """
+    Detailed trade closure message per spec Step 8.
+    All values come from actual executed prices stored on the trade.
+    realized_rr is always computed from actual_entry → exit_price,
+    never from projected or zone-midpoint prices.
+    """
+    is_tp = (trade.state.value == "tp_hit")
+    icon    = "✅" if is_tp else "❌"
+    outcome = "TAKE PROFIT HIT" if is_tp else "STOP LOSS HIT"
+
+    entry    = trade.entry_price  or 0.0
+    exit_px  = trade.exit_price   or 0.0
+    sl       = trade.stop_loss
+    rr       = trade.realized_rr
+    rr_str   = f"{rr:+.2f}" if rr is not None else "—"
+    pnl_str  = f"{rr:+.2f}R" if rr is not None else "—"
+
+    risk_d   = trade.risk_distance
+    rew_d    = trade.reward_distance
+    risk_str = fmt_price(risk_d)  if risk_d  is not None else "—"
+    rew_str  = fmt_price(rew_d)   if rew_d   is not None else "—"
+    if not is_tp and rew_d is not None:
+        rew_str = f"-{rew_str}"   # adverse move shown as negative on SL
+
+    duration  = _fmt_duration(trade.triggered_ts, trade.closed_ts)
+    journal_id = f"#{trade.id[-4:].upper()}"
+
+    lines = [
+        f"{icon} *{outcome}*\n",
+        f"*{trade.symbol}* | {trade.direction.value.capitalize()}",
+        "",
+        f"Entry:        `{fmt_price(entry)}`",
+        f"Exit:         `{fmt_price(exit_px)}`",
+        f"Risk:         `{risk_str}`",
+        f"Reward:       `{rew_str}`",
+        "",
+    ]
+    if is_tp:
+        lines += [
+            f"Planned RR:   `{trade.planned_rr:.2f}`",
+            f"Realized RR:  `{rr_str}`",
+            f"PnL:          `{pnl_str}`",
+        ]
+    else:
+        lines += [
+            f"Realized RR:  `{rr_str}`",
+        ]
+    lines += [
+        "",
+        f"Duration:     `{duration}`",
+        f"Confluence:   `{trade.confluence_score}/10`",
+        f"Journal ID:   `{journal_id}`",
+    ]
+    return "\n".join(lines)
 
 
 def build_status_message() -> str:

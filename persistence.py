@@ -66,6 +66,12 @@ trades_table = Table(
     Column("realized_rr", Float, nullable=True),
     Column("source", String(16), nullable=False, default="swing"),
     Column("pattern", String(64), nullable=False, default=""),
+    # Accounting columns added in v2.1
+    Column("planned_entry",   Float, nullable=True),
+    Column("actual_target",   Float, nullable=True),
+    Column("slippage",        Float, nullable=True),
+    Column("risk_distance",   Float, nullable=True),
+    Column("reward_distance", Float, nullable=True),
 )
 
 cooldowns_table = Table(
@@ -97,8 +103,24 @@ _lock = threading.Lock()  # serialises writes; reads are lock-free
 
 def init_db() -> None:
     metadata.create_all(_engine)
+    # Migrate existing databases: add new accounting columns if absent.
+    # SQLite ignores ADD COLUMN when the column already exists (via try/except).
+    _new_columns = [
+        ("planned_entry",   "REAL"),
+        ("actual_target",   "REAL"),
+        ("slippage",        "REAL"),
+        ("risk_distance",   "REAL"),
+        ("reward_distance", "REAL"),
+    ]
+    with _engine.begin() as conn:
+        for col, col_type in _new_columns:
+            try:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE trades ADD COLUMN {col} {col_type}"
+                )
+            except Exception:
+                pass  # column already exists — safe to ignore
     # WAL mode: readers never block writers and writers never block readers.
-    # Safe to set unconditionally on every startup; SQLite persists the setting.
     try:
         with _engine.begin() as conn:
             conn.exec_driver_sql("PRAGMA journal_mode=WAL;")

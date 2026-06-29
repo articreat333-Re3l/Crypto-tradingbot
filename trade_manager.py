@@ -1,16 +1,39 @@
 """
 trade_manager.py
 ================
-Steps 6-7: the pending trade object and the retest engine, plus Step 9's
-running-trade monitor. This is the core difference from the old bot --
-nothing fires immediately. A breakout creates a Trade in PENDING state;
-every loop iteration re-checks every open trade (pending or running)
-against fresh candles until it resolves to a terminal state.
+Retest engine and trade lifecycle state machine.
 
-The retest scan is intentionally stateless: it re-examines a short
-trailing window of confirmation-timeframe candles each call rather than
-relying on an in-memory "have we already touched the zone" flag, so a bot
-restart mid-retest can't lose track of what already happened.
+Accounting fix (v2.1)
+----------------------
+The previous code set trade.realized_rr at TRIGGER time by calling
+compute_rr(actual_entry, planned_stop, planned_tp).  This is wrong for
+two reasons:
+
+  1. realized_rr should only be set when the trade CLOSES, not when it
+     opens — projecting a closed-trade metric before the trade exists is
+     misleading.
+
+  2. The planned TP is anchored to zone.midpoint.  The actual entry in
+     CONFIRMATION mode is the candle close outside the zone boundary —
+     always different from zone.midpoint.  Using actual_entry with the
+     zone.midpoint-anchored TP underestimates reward and overstates risk,
+     producing RR values far below planned (0.39 on a planned 2.50 trade).
+
+Fix applied here
+-----------------
+At trigger time:
+  • actual_target is computed from actual_entry using the same planned_rr
+    multiplier:  actual_target = actual_entry ± risk * planned_rr
+  • slippage and risk_distance are recorded for audit/debug
+  • realized_rr is NOT set (trade is open, no realised P&L exists)
+
+At close time:
+  • compute_trade_performance() is called with actual_entry and the real
+    exit_price (actual_target on TP, stop_loss on SL)
+  • This is the ONLY place realized_rr is set
+  • SL exits produce exactly -1.00 by the math (exit == stop_loss)
+  • TP exits produce exactly planned_rr by the math (actual_target was
+    constructed to give planned_rr from actual_entry)
 """
 
 from __future__ import annotations
@@ -24,7 +47,7 @@ import persistence
 from config import settings
 from logger import get_logger
 from models import Direction, RetestMode, Trade, TradeState, Zone, ZoneSource
-from risk_manager import compute_rr
+from risk_manager import compute_actual_target, compute_trade_performance
 from utils import last_closed_candle
 
 log = get_logger(__name__)
@@ -40,6 +63,7 @@ def create_pending_trade(
     planned_rr: float,
     confluence_score: int,
     source: str,
+    planned_entry: float,        # zone.midpoint — stored for slippage calculation
     pattern: str = "",
 ) -> Trade:
     now = time.time()
@@ -58,6 +82,7 @@ def create_pending_trade(
         expiry_ts=now + settings.pending_trade_expiry_seconds,
         source=source,
         pattern=pattern,
+        planned_entry=planned_entry,
     )
     persistence.save_trade(trade)
     return trade
@@ -91,34 +116,18 @@ def _scan_confirmation(
 ) -> Tuple[Optional[str], Optional[float]]:
     """
     Scan the last `window` closed candles for a retest confirmation.
-
-    State machine:
-      1. Find the first candle that overlaps the zone (touch).
-      2. The first subsequent candle that closes back *outside* the zone
-         in the trade's direction triggers entry.
-      3. A close back outside *against* the trade direction invalidates.
-
-    Bug fixed: previously, if the zone was touched more than `window`
-    candles ago the scan started `touched=False` and could never confirm,
-    because the touch was outside the window.  Now `touched_ts_ms` carries
-    forward the persisted touch timestamp.  When supplied, the scan starts
-    from the first candle at-or-after that timestamp with `touched=True`,
-    so the confirmation check is never blocked by a stale window.
+    touched_ts_ms carries forward the persisted touch timestamp so candles
+    between the touch and the current window are not skipped.
     """
     _, idx = last_closed_candle(df)
     start = max(0, idx - window + 1)
     touched = False
 
-    # If a touch was recorded in a prior loop, anchor the scan to that point
-    # so candles between the touch and the current window aren't skipped.
     if touched_ts_ms is not None and "time" in df.columns:
-        # Find the first candle whose timestamp is >= the touch timestamp.
         for j in range(start, idx + 1):
             if int(df["time"].iloc[j]) >= touched_ts_ms:
                 start = j
                 break
-        # If touched_ts_ms is older than all candles in the window, start
-        # is unchanged but all window candles are post-touch -- correct.
         touched = True
 
     for i in range(start, idx + 1):
@@ -128,9 +137,8 @@ def _scan_confirmation(
         if not touched:
             if zone.overlaps_range(low, high):
                 touched = True
-            continue  # always skip to next candle until zone is entered
+            continue
 
-        # Post-touch: look for a close that exits the zone decisively.
         if direction is Direction.BEARISH:
             if close < zone.bottom:
                 return "triggered", close
@@ -151,9 +159,8 @@ def process_pending_trade(
     df_confirmation: Optional[pd.DataFrame],
 ) -> Optional[str]:
     """
-    Advance a single PENDING trade by one tick. Returns an event string
-    ("triggered" / "expired" / "invalidated") describing what changed
-    this call, or None if nothing changed (still waiting).
+    Advance a PENDING trade by one tick.
+    Returns "triggered" / "expired" / "invalidated" / None.
     """
     now = time.time()
 
@@ -163,9 +170,6 @@ def process_pending_trade(
         persistence.save_trade(trade)
         return "expired"
 
-    # Early invalidation: if price has already closed beyond the planned
-    # stop loss on the execution timeframe, the setup failed structurally
-    # -- no point waiting out the rest of the expiry window.
     if df_execution is not None and not df_execution.empty:
         candle, _ = last_closed_candle(df_execution)
         close_px = float(candle["close"])
@@ -187,8 +191,6 @@ def process_pending_trade(
     if trade.retest_mode is RetestMode.TOUCH:
         outcome, entry_price = _scan_touch(df_confirmation, zone)
     else:
-        # Pass the persisted touch timestamp so the confirmation scan is not
-        # blocked if the touch candle has scrolled outside the window.
         touched_ts_ms = int(trade.touched_ts * 1000) if trade.touched_ts else None
         outcome, entry_price = _scan_confirmation(
             df_confirmation, zone, trade.direction,
@@ -197,11 +199,30 @@ def process_pending_trade(
         )
 
     if outcome == "triggered":
-        trade.state = TradeState.RUNNING
-        trade.entry_price = entry_price
+        trade.state    = TradeState.RUNNING
+        trade.entry_price  = entry_price
         trade.triggered_ts = now
-        trade.touched_ts = trade.touched_ts or now
-        trade.realized_rr = compute_rr(trade.direction, entry_price, trade.stop_loss, trade.take_profit)
+        trade.touched_ts   = trade.touched_ts or now
+
+        # --- Accounting fix: anchor TP to actual entry, record slippage ---
+        actual_target = compute_actual_target(
+            trade.direction, entry_price, trade.stop_loss, trade.planned_rr
+        )
+        trade.actual_target  = actual_target
+        trade.risk_distance  = abs(entry_price - trade.stop_loss)
+        trade.slippage       = (entry_price - (trade.planned_entry or entry_price))
+        trade.realized_rr    = None   # not closed — never project realized RR
+
+        log.debug(
+            "[ENTRY] %s %s | planned_entry=%.6f actual_entry=%.6f slippage=%.6f "
+            "planned_stop=%.6f actual_target=%.6f planned_tp=%.6f "
+            "risk_distance=%.6f planned_rr=%.4f",
+            trade.symbol, trade.direction.value,
+            trade.planned_entry or 0, entry_price, trade.slippage,
+            trade.stop_loss, actual_target or 0, trade.take_profit,
+            trade.risk_distance, trade.planned_rr,
+        )
+
         persistence.save_trade(trade)
         return "triggered"
 
@@ -218,31 +239,34 @@ def process_pending_trade(
     return None
 
 
-def process_running_trade(trade: Trade, df_confirmation: Optional[pd.DataFrame]) -> Optional[str]:
+def process_running_trade(
+    trade: Trade,
+    df_confirmation: Optional[pd.DataFrame],
+) -> Optional[str]:
     """
-    Monitor a RUNNING trade against TP/SL on the confirmation timeframe.
+    Monitor a RUNNING trade against TP/SL.
 
-    Bug fixed: previously only the single last closed candle was checked.
-    If the bot was down (restart, crash) while a running trade hit TP or SL,
-    that outcome was permanently missed and the trade stayed RUNNING forever.
+    TP detection uses actual_target (TP anchored to actual_entry) when
+    available, falling back to the original planned take_profit for trades
+    created before v2.1.
 
-    Now all candles since triggered_ts are scanned in chronological order.
-    SL is checked before TP on any single candle (conservative tie-break).
+    All P&L metrics are computed by compute_trade_performance() — the single
+    canonical calculator — using only actual executed prices.
     """
     if df_confirmation is None or df_confirmation.empty:
         return None
 
     now = time.time()
 
-    # Build the scan slice: all candles with a close time strictly after
-    # the trade's entry timestamp.  This covers any gap from a restart.
+    # Prefer actual_target; fall back to planned take_profit for legacy trades.
+    tp_price = trade.actual_target if trade.actual_target is not None else trade.take_profit
+
     if trade.triggered_ts is not None and "time" in df_confirmation.columns:
         triggered_ms = int(trade.triggered_ts * 1000)
         scan_df = df_confirmation[df_confirmation["time"] > triggered_ms]
         if scan_df.empty:
-            return None   # no new candles since entry yet
+            return None
     else:
-        # Fallback: check only the last closed candle (original behaviour)
         _, last_idx = last_closed_candle(df_confirmation)
         scan_df = df_confirmation.iloc[[last_idx]]
 
@@ -251,40 +275,57 @@ def process_running_trade(trade: Trade, df_confirmation: Optional[pd.DataFrame])
 
         if trade.direction is Direction.BEARISH:
             sl_hit = high >= trade.stop_loss
-            tp_hit = low <= trade.take_profit
+            tp_hit = low  <= tp_price
         else:
-            sl_hit = low <= trade.stop_loss
-            tp_hit = high >= trade.take_profit
+            sl_hit = low  <= trade.stop_loss
+            tp_hit = high >= tp_price
 
-        # SL takes priority: if price hit both on the same candle we assume
-        # the adverse move happened first (conservative, avoids overstating P&L).
+        # SL takes priority on same-candle hits (conservative tie-break).
         if sl_hit:
-            trade.state = TradeState.SL_HIT
-            trade.exit_price = trade.stop_loss
-            trade.closed_ts = now
-            trade.realized_rr = -1.0
+            exit_px = trade.stop_loss
+            perf = compute_trade_performance(
+                trade.direction, trade.entry_price, trade.stop_loss, exit_px
+            )
+            trade.state          = TradeState.SL_HIT
+            trade.exit_price     = exit_px
+            trade.closed_ts      = now
+            trade.realized_rr    = perf["realized_rr"]    # always -1.00 when exit == SL
+            trade.reward_distance = perf["reward_distance"]
             persistence.save_trade(trade)
+
+            log.debug(
+                "[EXIT-SL] %s | entry=%.6f sl=%.6f exit=%.6f "
+                "risk=%.6f reward=%.6f realized_rr=%.4f",
+                trade.symbol, trade.entry_price, trade.stop_loss, exit_px,
+                perf["risk_distance"], perf["reward_distance"], perf["realized_rr"],
+            )
             return "sl_hit"
 
         if tp_hit:
-            trade.state = TradeState.TP_HIT
-            trade.exit_price = trade.take_profit
-            trade.closed_ts = now
-            trade.realized_rr = compute_rr(
-                trade.direction, trade.entry_price, trade.stop_loss, trade.take_profit
+            exit_px = tp_price
+            perf = compute_trade_performance(
+                trade.direction, trade.entry_price, trade.stop_loss, exit_px
             )
+            trade.state          = TradeState.TP_HIT
+            trade.exit_price     = exit_px
+            trade.closed_ts      = now
+            trade.realized_rr    = perf["realized_rr"]    # equals planned_rr by construction
+            trade.reward_distance = perf["reward_distance"]
             persistence.save_trade(trade)
+
+            log.debug(
+                "[EXIT-TP] %s | entry=%.6f actual_target=%.6f exit=%.6f "
+                "risk=%.6f reward=%.6f realized_rr=%.4f planned_rr=%.4f",
+                trade.symbol, trade.entry_price, tp_price, exit_px,
+                perf["risk_distance"], perf["reward_distance"],
+                perf["realized_rr"], trade.planned_rr,
+            )
             return "tp_hit"
 
     return None
 
 
 def has_open_trade(symbol: str, direction: Direction) -> bool:
-    # Note: TradeState.TRIGGERED is included in the query for forward-compat
-    # but is never actually set by the current code (process_pending_trade
-    # moves PENDING → RUNNING directly).
     open_states = [TradeState.PENDING, TradeState.TRIGGERED, TradeState.RUNNING]
     existing = persistence.get_trades(symbol=symbol, states=open_states)
-    # Use == not `is`: Direction is a str-Enum whose members are singletons
-    # in CPython, but == is the correct operator for value comparison.
     return any(t.direction == direction for t in existing)

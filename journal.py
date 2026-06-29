@@ -193,6 +193,11 @@ def initialize_database() -> None:
                     max_drawdown            REAL,
                     max_favorable_excursion REAL,
                     exit_reason             TEXT,
+                    planned_entry           REAL,
+                    actual_target           REAL,
+                    slippage                REAL,
+                    risk_distance           REAL,
+                    reward_distance         REAL,
                     FOREIGN KEY (signal_id) REFERENCES signals(id)
                 );
 
@@ -229,6 +234,26 @@ def initialize_database() -> None:
             log.info("Journal database ready at %s", DB_PATH)
         except Exception as exc:
             log.error("Journal init failed: %s", exc)
+        finally:
+            conn.close()
+
+    # Migrate existing journal databases: add new accounting columns if absent.
+    _journal_new_cols = [
+        ("planned_entry",   "REAL"),
+        ("actual_target",   "REAL"),
+        ("slippage",        "REAL"),
+        ("risk_distance",   "REAL"),
+        ("reward_distance", "REAL"),
+    ]
+    with _lock:
+        conn = _connect()
+        try:
+            for col, col_type in _journal_new_cols:
+                try:
+                    conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass  # column already exists
+            conn.commit()
         finally:
             conn.close()
 
@@ -351,6 +376,7 @@ def record_trade_entry(trade: Any) -> None:
 def record_trade_exit(trade: Any, exit_reason: str) -> None:
     """
     Update the trades row when a trade closes.
+    All prices come from actual executed values on the Trade object.
     exit_reason: 'TP' | 'SL' | 'Manual' | 'Expired' | 'Cancelled' | 'Invalidated'
     """
     try:
@@ -360,12 +386,10 @@ def record_trade_exit(trade: Any, exit_reason: str) -> None:
         )
         result = "Win" if exit_reason == "TP" else "Loss"
 
-        # Duration in minutes
         duration_min: Optional[float] = None
         if trade.triggered_ts and trade.closed_ts:
             duration_min = (trade.closed_ts - trade.triggered_ts) / 60.0
 
-        # Profit % (raw price move, direction-adjusted)
         profit_pct: Optional[float] = None
         if trade.entry_price and trade.exit_price and trade.entry_price != 0:
             if trade.direction.value == "bullish":
@@ -379,8 +403,10 @@ def record_trade_exit(trade: Any, exit_reason: str) -> None:
                 id, signal_id, entry_time, exit_time,
                 entry_price, exit_price, stop_loss, take_profit,
                 result, profit_r, profit_percent, duration_minutes,
-                max_drawdown, max_favorable_excursion, exit_reason
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                max_drawdown, max_favorable_excursion, exit_reason,
+                planned_entry, actual_target, slippage,
+                risk_distance, reward_distance
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
                 exit_time=excluded.exit_time,
                 exit_price=excluded.exit_price,
@@ -388,7 +414,11 @@ def record_trade_exit(trade: Any, exit_reason: str) -> None:
                 profit_r=excluded.profit_r,
                 profit_percent=excluded.profit_percent,
                 duration_minutes=excluded.duration_minutes,
-                exit_reason=excluded.exit_reason
+                exit_reason=excluded.exit_reason,
+                actual_target=excluded.actual_target,
+                slippage=excluded.slippage,
+                risk_distance=excluded.risk_distance,
+                reward_distance=excluded.reward_distance
             """,
             (
                 trade.id,
@@ -404,9 +434,14 @@ def record_trade_exit(trade: Any, exit_reason: str) -> None:
                 trade.realized_rr,
                 profit_pct,
                 duration_min,
-                None,   # max_drawdown -- requires intrabar tracking, not available
-                None,   # max_favorable_excursion -- same
+                None,   # max_drawdown: requires intrabar tracking
+                None,   # max_favorable_excursion: requires intrabar tracking
                 exit_reason,
+                trade.planned_entry,
+                trade.actual_target,
+                trade.slippage,
+                trade.risk_distance,
+                trade.reward_distance,
             ),
         )
     except Exception as exc:

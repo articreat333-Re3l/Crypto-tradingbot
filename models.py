@@ -155,23 +155,29 @@ class Trade:
     zone_top: float
     zone_bottom: float
     atr: float
-    stop_loss: float
-    take_profit: float
-    planned_rr: float
+    stop_loss: float        # planned stop  (set at signal creation, never moved)
+    take_profit: float      # planned target (based on zone.midpoint; kept for reference)
+    planned_rr: float       # RR computed from zone.midpoint → stop → planned TP
     confluence_score: int
     retest_mode: RetestMode
     created_ts: float
     expiry_ts: float
     state: TradeState = TradeState.PENDING
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    touched_ts: Optional[float] = None       # first time price entered the zone
-    entry_price: Optional[float] = None
+    touched_ts: Optional[float] = None
+    entry_price: Optional[float] = None      # actual fill price (set at trigger)
     triggered_ts: Optional[float] = None
     closed_ts: Optional[float] = None
-    exit_price: Optional[float] = None
-    realized_rr: Optional[float] = None
+    exit_price: Optional[float] = None       # actual exit price (set at close)
+    realized_rr: Optional[float] = None      # set only on close, never before
     source: str = ZoneSource.SWING.value
     pattern: str = ""
+    # --- Accounting fields (added in v2.1) ---
+    planned_entry: Optional[float] = None    # zone.midpoint at signal creation
+    actual_target: Optional[float] = None    # TP reanchored to actual_entry at trigger
+    slippage: Optional[float] = None         # actual_entry – planned_entry (signed)
+    risk_distance: Optional[float] = None    # abs(actual_entry – stop_loss)
+    reward_distance: Optional[float] = None  # abs(exit_price – actual_entry)
 
     def to_row(self) -> dict:
         return {
@@ -197,6 +203,11 @@ class Trade:
             "realized_rr": self.realized_rr,
             "source": self.source,
             "pattern": self.pattern,
+            "planned_entry": self.planned_entry,
+            "actual_target": self.actual_target,
+            "slippage": self.slippage,
+            "risk_distance": self.risk_distance,
+            "reward_distance": self.reward_distance,
         }
 
     @staticmethod
@@ -224,4 +235,9 @@ class Trade:
             realized_rr=row.get("realized_rr"),
             source=row.get("source", ZoneSource.SWING.value),
             pattern=row.get("pattern", ""),
+            planned_entry=row.get("planned_entry"),
+            actual_target=row.get("actual_target"),
+            slippage=row.get("slippage"),
+            risk_distance=row.get("risk_distance"),
+            reward_distance=row.get("reward_distance"),
         )
