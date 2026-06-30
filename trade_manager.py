@@ -167,6 +167,7 @@ def process_pending_trade(
     if now > trade.expiry_ts:
         trade.state = TradeState.EXPIRED
         trade.closed_ts = now
+        trade.exit_reason = "Expired"
         persistence.save_trade(trade)
         return "expired"
 
@@ -180,6 +181,7 @@ def process_pending_trade(
         if invalidated:
             trade.state = TradeState.INVALIDATED
             trade.closed_ts = now
+            trade.exit_reason = "Invalidated"
             persistence.save_trade(trade)
             return "invalidated"
 
@@ -229,6 +231,7 @@ def process_pending_trade(
     if outcome == "invalidated":
         trade.state = TradeState.INVALIDATED
         trade.closed_ts = now
+        trade.exit_reason = "Invalidated"
         persistence.save_trade(trade)
         return "invalidated"
 
@@ -291,6 +294,7 @@ def process_running_trade(
             trade.closed_ts      = now
             trade.realized_rr    = perf["realized_rr"]    # always -1.00 when exit == SL
             trade.reward_distance = perf["reward_distance"]
+            trade.exit_reason    = "SL"
             persistence.save_trade(trade)
 
             log.debug(
@@ -311,6 +315,7 @@ def process_running_trade(
             trade.closed_ts      = now
             trade.realized_rr    = perf["realized_rr"]    # equals planned_rr by construction
             trade.reward_distance = perf["reward_distance"]
+            trade.exit_reason    = "TP"
             persistence.save_trade(trade)
 
             log.debug(

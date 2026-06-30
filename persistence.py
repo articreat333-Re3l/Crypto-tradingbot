@@ -72,6 +72,7 @@ trades_table = Table(
     Column("slippage",        Float, nullable=True),
     Column("risk_distance",   Float, nullable=True),
     Column("reward_distance", Float, nullable=True),
+    Column("exit_reason",     String(16), nullable=True),
 )
 
 cooldowns_table = Table(
@@ -111,6 +112,7 @@ def init_db() -> None:
         ("slippage",        "REAL"),
         ("risk_distance",   "REAL"),
         ("reward_distance", "REAL"),
+        ("exit_reason",     "TEXT"),
     ]
     with _engine.begin() as conn:
         for col, col_type in _new_columns:

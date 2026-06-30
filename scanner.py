@@ -252,7 +252,7 @@ def _process_open_trades(symbol: str, df_exec, df_conf) -> None:
                     log.info("%s TP hit RR=%.2f", trade.symbol, trade.realized_rr)
                     try:
                         journal.update_signal_status(trade.id, "Completed")
-                        journal.record_trade_exit(trade, "TP")
+                        journal.record_trade_exit(trade, trade.exit_reason or "TP")
                     except Exception as _je:
                         log.debug("journal tp_hit hook error: %s", _je)
                 elif outcome == "sl_hit":
@@ -260,7 +260,7 @@ def _process_open_trades(symbol: str, df_exec, df_conf) -> None:
                     log.info("%s SL hit", trade.symbol)
                     try:
                         journal.update_signal_status(trade.id, "Completed")
-                        journal.record_trade_exit(trade, "SL")
+                        journal.record_trade_exit(trade, trade.exit_reason or "SL")
                     except Exception as _je:
                         log.debug("journal sl_hit hook error: %s", _je)
 
@@ -278,12 +278,14 @@ def _process_open_trades(symbol: str, df_exec, df_conf) -> None:
                     log.info("%s pending trade expired", trade.symbol)
                     try:
                         journal.update_signal_status(trade.id, "Expired")
+                        journal.record_trade_exit(trade, trade.exit_reason or "Expired")
                     except Exception as _je:
                         log.debug("journal expired hook error: %s", _je)
                 elif outcome == "invalidated":
                     log.info("%s pending trade invalidated (structure broke)", trade.symbol)
                     try:
                         journal.update_signal_status(trade.id, "Invalidated")
+                        journal.record_trade_exit(trade, trade.exit_reason or "Invalidated")
                     except Exception as _je:
                         log.debug("journal invalidated hook error: %s", _je)
 

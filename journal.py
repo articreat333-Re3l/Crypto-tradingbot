@@ -384,7 +384,14 @@ def record_trade_exit(trade: Any, exit_reason: str) -> None:
             datetime.fromtimestamp(trade.closed_ts, tz=timezone.utc).isoformat()
             if trade.closed_ts else _now_iso()
         )
-        result = "Win" if exit_reason == "TP" else "Loss"
+        if exit_reason == "TP":
+            result = "Win"
+        elif exit_reason == "SL":
+            result = "Loss"
+        else:
+            # Expired / Invalidated / Cancelled / Manual never entered a
+            # position with a TP/SL resolution -- not a win or a loss.
+            result = None
 
         duration_min: Optional[float] = None
         if trade.triggered_ts and trade.closed_ts:

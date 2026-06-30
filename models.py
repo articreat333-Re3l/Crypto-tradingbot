@@ -178,6 +178,7 @@ class Trade:
     slippage: Optional[float] = None         # actual_entry – planned_entry (signed)
     risk_distance: Optional[float] = None    # abs(actual_entry – stop_loss)
     reward_distance: Optional[float] = None  # abs(exit_price – actual_entry)
+    exit_reason: Optional[str] = None        # 'TP' | 'SL' | 'Expired' | 'Invalidated' | 'Manual' | 'Cancelled'
 
     def to_row(self) -> dict:
         return {
@@ -208,6 +209,7 @@ class Trade:
             "slippage": self.slippage,
             "risk_distance": self.risk_distance,
             "reward_distance": self.reward_distance,
+            "exit_reason": self.exit_reason,
         }
 
     @staticmethod
@@ -240,4 +242,5 @@ class Trade:
             slippage=row.get("slippage"),
             risk_distance=row.get("risk_distance"),
             reward_distance=row.get("reward_distance"),
+            exit_reason=row.get("exit_reason"),
         )
